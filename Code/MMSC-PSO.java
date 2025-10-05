@@ -12,29 +12,44 @@ import java.util.*;
 import org.tukaani.xz.LZMA2Options;
 import org.tukaani.xz.XZOutputStream;
 
-/**
- * @author zohaib
- * Updated to process multiple CTL values and all files in goKrimpData/original/DS/,
- * saving results in goKrimpData/original/DS/PSO/resultsPSO.csv.
- */
-public class PSO{
+
+public class PSO {
     private static final int SWARM_SIZE = 30;
     private static final int MAX_ITERATIONS = 100;
     private static final double C1 = 2.0; // cognitive parameter
     private static final double C2 = 2.0; // social parameter
     private static final double W = 0.7;  // inertia weight
-    private static final int[] CTL_VALUES = {0, 2, 4, 6, 8, 10}; // Multiple CTL values
-    private static final int MIN_PATTERN_SIZE = 2;
-    private static final int MAX_PATTERN_SIZE = 4;
+   private static final int[] CTL_VALUES = {0, 2, 4, 6, 8, 10}; // Multiple CTL values
+    // private static final int[] CTL_VALUES = {4}; // Multiple CTL values
+
+    private static final int MIN_PATTERN_LENGTH = 2;
+    private static final int MAX_PATTERN_LENGTH = 4;
     
     private static List<String> sequences;
     private static List<String> originalSequences;
     private static Set<String> uniqueItems;
     private static final Random random = new Random();
     private static List<PatternResult> foundPatterns;
-    private static String folderPath = "goKrimpData/original/DS/";
-    private static String outputFolder = "goKrimpData/original/DS/PSO/";
-    private static String datasetName;
+    private static String folderPath = "goKrimpData/original/dna/";
+    private static String outputFolder = "goKrimpData/original/dna/output/";
+    private static String datasetName="AeCaCleaned";
+    
+    // Method to find the next available PSO folder
+    private static String getNextAvailablePSOFolder() {
+        String baseFolder = outputFolder + "PSO";
+        int folderNumber = 1;
+        String folderPath = baseFolder;
+        
+        while (new File(folderPath).exists()) {
+            folderNumber++;
+            folderPath = baseFolder + folderNumber;
+        }
+        
+        return folderPath + "/";
+    }
+    private static double[] patternLengthWeights = {1.0/3, 1.0/3, 1.0/3}; // Initial weights for lengths 2, 3, 4
+    private static final double WEIGHT_DECREASE = 0.1; // Amount to adjust weight for failed length
+    private static final double MIN_WEIGHT = 0.1; // Minimum weight to ensure all lengths are considered
 
     static class PatternResult {
         String[] pattern;
@@ -96,12 +111,15 @@ public class PSO{
 
             // Read dataset
             sequences = new ArrayList<>();
+            originalSequences = new ArrayList<>();
             uniqueItems = new HashSet<>();
             try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     String[] items = line.trim().split("\\s+");
-                    sequences.add(String.join(" ", items));
+                    String sequence = String.join(" ", items);
+                    sequences.add(sequence);
+                    originalSequences.add(sequence);
                     for (String item : items) {
                         if (!item.isEmpty()) {
                             uniqueItems.add(item);
@@ -113,23 +131,28 @@ public class PSO{
                 continue;
             }
 
-            originalSequences = new ArrayList<>(sequences);
-
             // Process each CTL value
             for (int CTL : CTL_VALUES) {
                 long startTime = System.currentTimeMillis();
                 foundPatterns = new ArrayList<>();
+                // Reset pattern length weights for each CTL
+                patternLengthWeights = new double[]{1.0/3, 1.0/3, 1.0/3};
 
                 // Find patterns for current CTL
                 if (CTL > 0) {
                     while (foundPatterns.size() < CTL) {
-                        int patternSize = random.nextInt(MAX_PATTERN_SIZE - MIN_PATTERN_SIZE + 1) + MIN_PATTERN_SIZE;
+                        int patternSize = selectPatternSize();
                         System.out.println("Finding pattern #" + (foundPatterns.size() + 1) + " of size " + patternSize + " for CTL=" + CTL);
                         
                         PatternResult result = findPattern(patternSize);
                         if (result != null && result.frequency > 0 && !containsNull(result.pattern)) {
                             foundPatterns.add(result);
                             removePatternFromSequences(result.pattern);
+                            // Increase weight for successful pattern length
+                            adjustWeights(patternSize, true);
+                        } else {
+                            // Decrease weight for failed pattern length
+                            adjustWeights(patternSize, false);
                         }
                     }
 
@@ -166,6 +189,51 @@ public class PSO{
         }
     }
 
+    private static int selectPatternSize() {
+        double rand = random.nextDouble();
+        double cumulative = 0.0;
+        for (int i = 0; i < patternLengthWeights.length; i++) {
+            cumulative += patternLengthWeights[i];
+            if (rand <= cumulative) {
+                return i + MIN_PATTERN_LENGTH; // Maps index 0->2, 1->3, 2->4
+            }
+        }
+        return MAX_PATTERN_LENGTH; // Fallback to max length
+    }
+
+    private static void adjustWeights(int patternSize, boolean success) {
+        int index = patternSize - MIN_PATTERN_LENGTH; // Maps size 2->0, 3->1, 4->2
+        double totalWeight = Arrays.stream(patternLengthWeights).sum();
+        
+        if (success) {
+            // Increase weight for successful pattern length
+            patternLengthWeights[index] = Math.min(patternLengthWeights[index] + WEIGHT_DECREASE, 1.0);
+        } else {
+            // Decrease weight for failed pattern length
+            patternLengthWeights[index] = Math.max(patternLengthWeights[index] - WEIGHT_DECREASE, MIN_WEIGHT);
+        }
+
+        // Redistribute weights to other lengths
+        double remainingWeight = totalWeight - patternLengthWeights[index];
+        if (remainingWeight > 0) {
+            for (int i = 0; i < patternLengthWeights.length; i++) {
+                if (i != index) {
+                    patternLengthWeights[i] = (patternLengthWeights[i] / remainingWeight) * (totalWeight - patternLengthWeights[index]);
+                }
+            }
+        }
+
+        // Normalize weights to sum to 1
+        double sum = Arrays.stream(patternLengthWeights).sum();
+        for (int i = 0; i < patternLengthWeights.length; i++) {
+            patternLengthWeights[i] = patternLengthWeights[i] / sum;
+        }
+
+        // Debug: Print updated weights
+        System.out.printf("Updated pattern length weights: 2=%.3f, 3=%.3f, 4=%.3f\n", 
+            patternLengthWeights[0], patternLengthWeights[1], patternLengthWeights[2]);
+    }
+
     private static boolean containsNull(String[] pattern) {
         for (String item : pattern) {
             if (item == null) {
@@ -180,9 +248,14 @@ public class PSO{
         String[] globalBestPattern = new String[patternSize];
         int globalBestFitness = 0;
 
+        List<String> itemsList = new ArrayList<>(uniqueItems);
         for (int i = 0; i < SWARM_SIZE; i++) {
             swarm[i] = new Particle(patternSize);
-            initializeParticle(swarm[i]);
+            initializeParticle(swarm[i], itemsList);
+            if (swarm[i].bestFitness > globalBestFitness) {
+                globalBestFitness = swarm[i].bestFitness;
+                System.arraycopy(swarm[i].bestPattern, 0, globalBestPattern, 0, patternSize);
+            }
         }
 
         for (int iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
@@ -199,7 +272,7 @@ public class PSO{
                     System.arraycopy(particle.pattern, 0, globalBestPattern, 0, patternSize);
                 }
                 
-                updateParticle(particle, globalBestPattern);
+                updateParticle(particle, globalBestPattern, itemsList);
             }
         }
 
@@ -209,38 +282,7 @@ public class PSO{
         return null;
     }
 
-    private static void removePatternFromSequences(String[] pattern) {
-        List<String> newSequences = new ArrayList<>();
-        
-        for (String sequence : sequences) {
-            String[] tokens = sequence.trim().split("\\s+");
-            String newSequence = replacePatternWithEmpty(tokens, pattern);
-            if (!newSequence.trim().isEmpty()) {
-                newSequences.add(newSequence);
-            }
-        }
-        
-        sequences = newSequences;
-    }
-
-    private static String replacePatternWithEmpty(String[] tokens, String[] pattern) {
-        List<String> result = new ArrayList<>();
-        int i = 0;
-
-        while (i < tokens.length) {
-            if (i <= tokens.length - pattern.length && isContiguousMatch(tokens, i, pattern)) {
-                i += pattern.length; // Skip the matched pattern
-            } else {
-                result.add(tokens[i]);
-                i++;
-            }
-        }
-
-        return String.join(" ", result);
-    }
-
-    private static void initializeParticle(Particle particle) {
-        List<String> itemsList = new ArrayList<>(uniqueItems);
+    private static void initializeParticle(Particle particle, List<String> itemsList) {
         for (int i = 0; i < particle.pattern.length; i++) {
             particle.pattern[i] = itemsList.get(random.nextInt(itemsList.size()));
             particle.velocity[i] = random.nextDouble() * 2 - 1;
@@ -249,8 +291,7 @@ public class PSO{
         particle.bestFitness = evaluatePattern(particle.pattern);
     }
 
-    private static void updateParticle(Particle particle, String[] globalBest) {
-        List<String> itemsList = new ArrayList<>(uniqueItems);
+    private static void updateParticle(Particle particle, String[] globalBest, List<String> itemsList) {
         for (int i = 0; i < particle.pattern.length; i++) {
             double r1 = random.nextDouble();
             double r2 = random.nextDouble();
@@ -292,13 +333,43 @@ public class PSO{
         return true;
     }
 
+    private static void removePatternFromSequences(String[] pattern) {
+        List<String> newSequences = new ArrayList<>();
+        
+        for (String sequence : sequences) {
+            String[] tokens = sequence.trim().split("\\s+");
+            String newSequence = replacePatternWithEmpty(tokens, pattern);
+            if (!newSequence.trim().isEmpty()) {
+                newSequences.add(newSequence);
+            }
+        }
+        
+        sequences = newSequences;
+    }
+
+    private static String replacePatternWithEmpty(String[] tokens, String[] pattern) {
+        List<String> result = new ArrayList<>();
+        int i = 0;
+
+        while (i < tokens.length) {
+            if (i <= tokens.length - pattern.length && isContiguousMatch(tokens, i, pattern)) {
+                i += pattern.length;
+            } else {
+                result.add(tokens[i]);
+                i++;
+            }
+        }
+
+        return String.join(" ", result);
+    }
+
     private static double encodeAndSavePatterns(int CTL) {
         String encodedFilePath = outputFolder + "encoded_" + CTL + "_" + datasetName;
         String codeTableFilePath = outputFolder + "codeTable_" + CTL + "_" + datasetName + ".txt";
         double compressionRatio = 1.0; // Default if CTL=0 or no compression
 
         if (CTL == 0) {
-            // Copy original file as encoded f 5ile (no patterns)
+            // Copy original file as encoded file (no patterns)
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(encodedFilePath))) {
                 for (String sequence : originalSequences) {
                     writer.write(sequence + "\n");
@@ -329,14 +400,13 @@ public class PSO{
             
             int nextCode = maxNumber + 1;
             Map<String, Integer> patternToCode = new HashMap<>();
-
+            
             for (PatternResult pattern : foundPatterns) {
                 String patternStr = String.join(" ", pattern.pattern);
                 while (uniqueItems.contains(String.valueOf(nextCode))) {
                     nextCode++;
                 }
-                patternToCode.put(patternStr, nextCode);
-                nextCode++;
+                patternToCode.put(patternStr, nextCode++);
             }
             
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(codeTableFilePath))) {
@@ -401,7 +471,7 @@ public class PSO{
         return compressionRatio;
     }
 
-    public static String replacePatternTokens(String sequence, String pattern, String code) {
+    private static String replacePatternTokens(String sequence, String pattern, String code) {
         String[] tokens = sequence.trim().split("\\s+");
         String[] patternTokens = pattern.trim().split("\\s+");
         List<String> result = new ArrayList<>();
