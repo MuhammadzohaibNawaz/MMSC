@@ -112,7 +112,7 @@ public class PSO {
             // Read dataset
             sequences = new ArrayList<>();
             originalSequences = new ArrayList<>();
-            uniqueItems = new HashSet<>();
+            uniqueItems = new LinkedHashSet<>();
             try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
